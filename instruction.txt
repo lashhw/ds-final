@@ -29,15 +29,9 @@ Please include in comments or README-style notes that the user can create a venv
     . venv/bin/activate
     uv pip install numpy pandas scikit-learn matplotlib seaborn
 
-Optionally also suggest:
-
-    uv pip install jupyter pyarrow
-
 Then they can run:
 
     python main.py
-or
-    jupyter notebook
 
 You do NOT need to manage environment creation programmatically; just document the commands as comments and assume the venv exists when code is run.
 
@@ -46,17 +40,15 @@ DATA OVERVIEW
 =============
 Files in the current directory:
 
-- train.csv — about 13M rows (~2.1GB), 48 columns. Monthly records from 2015-01-28 to 2016-06-28 for many customers. :contentReference[oaicite:0]{index=0}  
-- test.csv — about 930k rows, mostly customers at 2016-06-28; same first 24 columns (customer features) but typically without the 24 product columns. :contentReference[oaicite:1]{index=1}  
-
-Each row is one (customer, month) pair. Columns 1–24 are customer info / status; columns 25–48 are product ownership flags. :contentReference[oaicite:2]{index=2}  
+- train.csv — about 13M rows (~2.1GB). Monthly records from 2015-01-28 to 2016-06-28 for many customers.
+- test.csv — about 930k rows, mostly customers at 2016-06-28.
 
 We focus on **segmentation of customers at a specific month** (for example, May 2016) and then analyze their behavior and product adoption, not on predicting next-month products like the original competition.
 
 
 COLUMN MEANINGS
 ===============
-Below is a concise description of each column in train.csv (the same first 24 columns appear in test.csv). Names are as in the original dataset. :contentReference[oaicite:3]{index=3}  
+Below is a concise description of each column in train.csv. Names are as in the original dataset.
 
 GENERAL / DEMOGRAPHIC AND STATUS COLUMNS (1–24)
 -----------------------------------------------
@@ -67,7 +59,7 @@ GENERAL / DEMOGRAPHIC AND STATUS COLUMNS (1–24)
     - Unique customer identifier.
 
 3.  ind_empleado  
-    - Employee index. Encodes whether the customer is an employee / ex-employee / other relationship with the bank (e.g., A=active employee, B=ex-employee, F=filial, N=not employee, P=passive). :contentReference[oaicite:4]{index=4}  
+    - Employee index. Encodes whether the customer is an employee / ex-employee / other relationship with the bank (e.g., A=active employee, B=ex-employee, F=filial, N=not employee, P=passive).
 
 4.  pais_residencia  
     - Country of residence of the customer (e.g., "ES" for Spain).
@@ -101,7 +93,7 @@ GENERAL / DEMOGRAPHIC AND STATUS COLUMNS (1–24)
       - 2 = co-owner
       - 3 = former primary
       - 4 = former co-owner
-      - P = potential. :contentReference[oaicite:5]{index=5}  
+      - P = potential.
 
 13. tiprel_1mes  
     - Relationship type at the beginning of the month:
@@ -144,12 +136,12 @@ GENERAL / DEMOGRAPHIC AND STATUS COLUMNS (1–24)
     - Segmentation label, e.g.:
       - "01 - VIP"
       - "02 - Individuals"
-      - "03 - college graduated". :contentReference[oaicite:6]{index=6}  
+      - "03 - college graduated".
 
 
 PRODUCT OWNERSHIP COLUMNS (25–48)
 ---------------------------------
-Each of these is typically a binary indicator (0/1) of whether the customer holds a given product as of that month. We will treat them as product ownership flags, not derive “newly added” labels like in the Kaggle competition. :contentReference[oaicite:7]{index=7}  
+Each of these is typically a binary indicator (0/1) of whether the customer holds a given product as of that month. We will treat them as product ownership flags, not derive “newly added” labels like in the Kaggle competition.
 
 25. ind_ahor_fin_ult1  
     - Savings account indicator.

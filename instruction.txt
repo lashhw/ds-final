@@ -40,8 +40,10 @@ DATA OVERVIEW
 =============
 Files in the current directory:
 
-- train.csv — about 13M rows (~2.1GB). Monthly records from 2015-01-28 to 2016-06-28 for many customers.
-- test.csv — about 930k rows, mostly customers at 2016-06-28.
+- train.csv — about 13M rows (~2.1GB).
+- test.csv — about 930k rows.
+
+You may refer to `dataset_description.txt` to know the details of the dataset.
 
 We focus on **segmentation of customers at a specific month** (for example, May 2016) and then analyze their behavior and product adoption, not on predicting next-month products like the original competition.
 

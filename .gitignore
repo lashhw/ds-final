@@ -1,4 +1,5 @@
 *
 !.gitignore
+!dataset_description.txt
 !instruction.txt
 !*.py

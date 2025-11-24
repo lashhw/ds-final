@@ -1,0 +1,489 @@
+TITLE
+=====
+Santander Customer Segmentation and Targeted Product Strategy
+(using Kaggle “Santander Product Recommendation” dataset, but NOT doing the competition task)
+
+
+HIGH-LEVEL GOAL
+===============
+Write Python code that:
+
+1. Loads and preprocesses the Santander product dataset (train.csv; test.csv is available but not central).
+2. Builds a customer-level dataset for 1 (or a few) selected months suitable for segmentation.
+3. Performs unsupervised clustering on customers based mainly on their product ownership and a few profile features.
+4. Analyzes and visualizes the resulting customer segments.
+5. Integrates Generative AI (GAI) in a lightweight way:
+   - The code should automatically generate prompt text files that I can paste into ChatGPT (or other LLMs) to create marketing personas and recommendation messages for each cluster.
+   - Optionally, if reasonable, you may include skeleton code for calling an LLM API, but it must be easy to disable and not required for the rest of the pipeline to run.
+
+Important: The aim is a **customer segmentation + product strategy** project, not to optimize the original Kaggle competition score (MAP@7). We only reuse the dataset.
+
+
+ENVIRONMENT SETUP
+=================
+Use Python 3.12, a virtual environment, and uv for package management. Assume the terminal supports these commands.
+
+Please include in comments or README-style notes that the user can create a venv and install packages with:
+
+    uv venv venv --python 3.12
+    . venv/bin/activate
+    uv pip install numpy pandas scikit-learn matplotlib seaborn
+
+Optionally also suggest:
+
+    uv pip install jupyter pyarrow
+
+Then they can run:
+
+    python main.py
+or
+    jupyter notebook
+
+You do NOT need to manage environment creation programmatically; just document the commands as comments and assume the venv exists when code is run.
+
+
+DATA OVERVIEW
+=============
+Files in the current directory:
+
+- train.csv — about 13M rows (~2.1GB), 48 columns. Monthly records from 2015-01-28 to 2016-06-28 for many customers. :contentReference[oaicite:0]{index=0}  
+- test.csv — about 930k rows, mostly customers at 2016-06-28; same first 24 columns (customer features) but typically without the 24 product columns. :contentReference[oaicite:1]{index=1}  
+
+Each row is one (customer, month) pair. Columns 1–24 are customer info / status; columns 25–48 are product ownership flags. :contentReference[oaicite:2]{index=2}  
+
+We focus on **segmentation of customers at a specific month** (for example, May 2016) and then analyze their behavior and product adoption, not on predicting next-month products like the original competition.
+
+
+COLUMN MEANINGS
+===============
+Below is a concise description of each column in train.csv (the same first 24 columns appear in test.csv). Names are as in the original dataset. :contentReference[oaicite:3]{index=3}  
+
+GENERAL / DEMOGRAPHIC AND STATUS COLUMNS (1–24)
+-----------------------------------------------
+1.  fecha_dato  
+    - Statement date (month). All rows are partitioned by this column; e.g., "2016-05-28" represents May 2016.
+
+2.  ncodpers  
+    - Unique customer identifier.
+
+3.  ind_empleado  
+    - Employee index. Encodes whether the customer is an employee / ex-employee / other relationship with the bank (e.g., A=active employee, B=ex-employee, F=filial, N=not employee, P=passive). :contentReference[oaicite:4]{index=4}  
+
+4.  pais_residencia  
+    - Country of residence of the customer (e.g., "ES" for Spain).
+
+5.  sexo  
+    - Customer’s sex (typically "H" for male, "V" for female, sometimes missing).
+
+6.  age  
+    - Customer age in years (string in the raw file; may require conversion to numeric and clipping of outliers).
+
+7.  fecha_alta  
+    - Date the customer first became the primary holder of a contract with the bank (join date).
+
+8.  ind_nuevo  
+    - New-customer indicator. 1 if the customer joined in the last 6 months, 0 otherwise.
+
+9.  antiguedad  
+    - Customer seniority in months (time with the bank). Often stored as a string.
+
+10. indrel  
+    - Primary customer index. Typical values:
+      - 1 = primary customer
+      - 99 = primary customer during the month but not at the end of the month.
+
+11. ult_fec_cli_1t  
+    - Last date when the customer was a primary customer (if they are no longer primary).
+
+12. indrel_1mes  
+    - Customer type at the beginning of the month, e.g.:
+      - 1 = primary
+      - 2 = co-owner
+      - 3 = former primary
+      - 4 = former co-owner
+      - P = potential. :contentReference[oaicite:5]{index=5}  
+
+13. tiprel_1mes  
+    - Relationship type at the beginning of the month:
+      - A = active
+      - I = inactive
+      - P = former customer
+      - R = potential.
+
+14. indresi  
+    - Residence index. "S" (yes) if residence country equals bank country, "N" (no) otherwise.
+
+15. indext  
+    - Foreigner index. "S" (yes) if birth country differs from bank country, "N" otherwise.
+
+16. conyuemp  
+    - Spouse-of-employee indicator. 1 if the customer is the spouse of a bank employee, else usually 0 or missing.
+
+17. canal_entrada  
+    - Channel used to join the bank (e.g., branch, internet, particular campaign code).
+
+18. indfall  
+    - Deceased indicator; usually "N" or "S".
+
+19. tipodom  
+    - Address type (e.g., 1 for primary address).
+
+20. cod_prov  
+    - Province code corresponding to the customer’s address.
+
+21. nomprov  
+    - Province name (string).
+
+22. ind_actividad_cliente  
+    - Activity index. 1 if the customer is active, 0 if inactive.
+
+23. renta  
+    - Household gross income (numeric, often with missing values, strong skew).
+
+24. segmento  
+    - Segmentation label, e.g.:
+      - "01 - VIP"
+      - "02 - Individuals"
+      - "03 - college graduated". :contentReference[oaicite:6]{index=6}  
+
+
+PRODUCT OWNERSHIP COLUMNS (25–48)
+---------------------------------
+Each of these is typically a binary indicator (0/1) of whether the customer holds a given product as of that month. We will treat them as product ownership flags, not derive “newly added” labels like in the Kaggle competition. :contentReference[oaicite:7]{index=7}  
+
+25. ind_ahor_fin_ult1  
+    - Savings account indicator.
+
+26. ind_aval_fin_ult1  
+    - Guarantees product indicator.
+
+27. ind_cco_fin_ult1  
+    - Current account(s) indicator.
+
+28. ind_cder_fin_ult1  
+    - Derivada account indicator (a particular type of account).
+
+29. ind_cno_fin_ult1  
+    - Payroll account indicator.
+
+30. ind_ctju_fin_ult1  
+    - Junior account indicator.
+
+31. ind_ctma_fin_ult1  
+    - “Más particular” account indicator.
+
+32. ind_ctop_fin_ult1  
+    - “Particular” account indicator.
+
+33. ind_ctpp_fin_ult1  
+    - “Particular plus” account indicator.
+
+34. ind_deco_fin_ult1  
+    - Short-term deposit account indicator.
+
+35. ind_deme_fin_ult1  
+    - Medium-term deposit account indicator.
+
+36. ind_dela_fin_ult1  
+    - Long-term deposit account indicator.
+
+37. ind_ecue_fin_ult1  
+    - Electronic (e-)account indicator.
+
+38. ind_fond_fin_ult1  
+    - Investment funds ownership indicator.
+
+39. ind_hip_fin_ult1  
+    - Mortgage product indicator.
+
+40. ind_plan_fin_ult1  
+    - Pensions product indicator.
+
+41. ind_pres_fin_ult1  
+    - Loans product indicator.
+
+42. ind_reca_fin_ult1  
+    - Taxes product indicator.
+
+43. ind_tjcr_fin_ult1  
+    - Credit card product indicator.
+
+44. ind_valo_fin_ult1  
+    - Securities portfolio indicator.
+
+45. ind_viv_fin_ult1  
+    - Home account indicator.
+
+46. ind_nomina_ult1  
+    - Payroll (salary) direct deposit indicator.
+
+47. ind_nom_pens_ult1  
+    - Pension income direct deposit indicator.
+
+48. ind_recibo_ult1  
+    - Direct debit payments indicator (utility bills, etc.).
+
+
+CORE ANALYTIC OBJECTIVE
+=======================
+Implement a pipeline that:
+
+1. Chooses a reference month (suggest default: 2016-05-28) and builds a customer-level segmentation dataset for that month.
+2. Optionally uses the next month (2016-06-28) to compute simple adoption statistics (e.g., which products customers adopt next) per segment.
+3. Performs unsupervised clustering on customers using mainly the product columns and a few profile features.
+4. Produces:
+   - Cluster assignments for each customer.
+   - Descriptive statistics and visualizations summarizing each cluster.
+   - One or more text files containing **prompt snippets for Generative AI**, so the user can paste them into ChatGPT or another LLM to generate marketing personas and tailored product recommendations per cluster.
+
+
+PIPELINE REQUIREMENTS (HIGH-LEVEL)
+==================================
+
+0. Project structure
+--------------------
+You can choose the code structure freely (single script, small package, or notebook). A simple option:
+
+- `main.py` — entry point that runs the full pipeline.
+- Optionally:
+  - `data_prep.py` — loading, cleaning, feature engineering.
+  - `clustering.py` — clustering and evaluation.
+  - `analysis.py` — summaries, visualisations, and GAI prompt generation.
+
+It’s fine if everything lives in `main.py` as long as it is logically organized with functions and clear comments.
+
+
+1. Efficient data loading for a huge CSV
+----------------------------------------
+`train.csv` is ~2.1GB with ~13M rows, so make memory-aware choices:
+
+- Use pandas and read in **chunks** (via `chunksize`) instead of loading the entire file at once.
+- While iterating over chunks, filter rows to only those months you actually need, e.g.:
+  - Reference month: `"2016-05-28"`.
+  - Optional next month: `"2016-06-28"`.
+- Concatenate those filtered chunks into a smaller in-memory DataFrame (or write intermediate filtered CSV/Parquet files like `train_2016-05-28.parquet` and `train_2016-06-28.parquet`).
+
+Requirements:
+
+- Implement a function that:
+  - Takes `train.csv` path.
+  - Takes a list of target months (e.g. `["2016-05-28", "2016-06-28"]`).
+  - Returns a dict of {month_string: DataFrame} or saves separate files and returns their paths.
+- Use `usecols` to limit the columns to those that are actually needed (probably all 48 columns for now).
+- Define appropriate dtypes (e.g., product columns as int8, categorical strings as "category") to reduce memory usage.
+
+
+2. Data cleaning and feature engineering
+----------------------------------------
+On the filtered T-month DataFrame (e.g., May 2016):
+
+- Make sure each row is **one customer at that month**.
+  - Remove duplicate `(fecha_dato, ncodpers)` combinations if they appear; keep the last or first consistently.
+
+- Handle missing values:
+  - For `age`: convert to numeric, handle impossible values by clipping to a reasonable range (e.g., [18, 100]) and impute missing with median or similar.
+  - For `renta`: convert to numeric, impute missing with median per province or global median; consider a log-transform later.
+  - For categorical features like `sexo`, `segmento`, etc., fill missing with "Unknown" and store as category dtype.
+
+- Ensure product columns are numeric 0/1:
+  - Coerce any non-numeric entries to 0 or 1 as appropriate.
+  - Cast to small integer type (e.g., int8).
+
+- Define a minimal, interpretable **feature set for clustering**, for example:
+  - All 24 product columns (as 0/1).
+  - Optional numeric features: age, (log) renta, antiguedad.
+  - Optional simple aggregates:
+    - Number of products owned (sum of the 24 product flags).
+    - Counts of product categories (e.g., deposits_count, card_loans_count, investment_count).
+
+- Optional dynamic behavior:
+  - If both month T and T-1 are loaded, compute:
+    - Number of newly added products (T minus T-1).
+    - Number of dropped products.
+  - This is nice-to-have but not mandatory; keep it simple if it complicates memory usage.
+
+Implement functions like:
+
+- `build_segmentation_features(df_t: DataFrame) -> DataFrame`
+  - where each row is one customer and columns are the features used for clustering.
+- Keep `ncodpers` somewhere so we can map cluster labels back to customers.
+
+
+3. Clustering
+-------------
+Use scikit-learn unsupervised models.
+
+Core requirement:
+
+- Implement K-means clustering as the main approach.
+
+Details:
+
+- Before K-means:
+  - Standardize only the continuous features (e.g., age, log_renta, aggregates) using `StandardScaler`.
+  - Leave binary product columns as 0/1 or scale them as well; you can try both and pick the more reasonable.
+
+- Explore different numbers of clusters (K), e.g., 3 to 10:
+  - Compute inertia and silhouette score for these K values.
+  - Pick a “reasonable” K programmatically (e.g., best silhouette) but also allow the user to override via a config variable.
+
+- Train final K-means with the chosen K and assign cluster labels back to each customer.
+
+Optional:
+
+- Implement an alternative clustering method for comparison:
+  - e.g., GaussianMixture, MiniBatchKMeans, or AgglomerativeClustering on a reduced-dimension representation.
+
+Output:
+
+- A DataFrame with at least:
+  - ncodpers
+  - fecha_dato
+  - cluster_label
+  - maybe key feature values
+- Save this to disk, e.g. `customer_clusters.csv` or `customer_clusters.parquet`.
+
+
+4. Segment (cluster) analysis and visualization
+-----------------------------------------------
+Implement functionality to analyze and visualize each cluster.
+
+For each cluster:
+
+- Compute:
+  - Number of customers.
+  - Distribution of age (mean, median, hist buckets).
+  - Distribution of renta (mean, median, maybe quantiles).
+  - Breakdown of categorical: sexo, segmento, etc.
+  - Ownership rates for each product (average of each 0/1 product column).
+  - Average number of products owned.
+
+- If data for next month (T+1, e.g., 2016-06-28) is available:
+  - Merge T and T+1 by ncodpers and compute, for each cluster:
+    - Fraction of customers who newly acquire each product in T+1 vs T.
+    - This gives “adoption tendency” per product, per cluster.
+
+Visualizations (using matplotlib and optionally seaborn):
+
+- Bar plots:
+  - Product ownership rate per cluster for selected products.
+  - Useful to see which clusters are more investment-heavy, credit-heavy, etc.
+
+- Histograms / KDE plots:
+  - Age distribution per cluster.
+
+- 2D scatter using PCA:
+  - Apply PCA to the feature matrix and plot customers colored by cluster.
+  - This is for visualization only.
+
+Save plots into an `output/` folder (e.g., PNG files) with meaningful names: `cluster_product_rates.png`, `cluster_age_distribution.png`, etc.
+
+
+5. Generative AI (GAI) integration via prompt files
+---------------------------------------------------
+We must incorporate Generative AI as a **helper**, not as the core modeling algorithm. The idea: the Python code will produce **prompt templates** and **cluster summaries** that the user can copy-paste into ChatGPT (or another LLM) to generate:
+
+- Marketing personas for each cluster.
+- Example personalized recommendation text for each cluster.
+
+Implement:
+
+- A function that, after clustering and analysis, creates a text file, e.g. `cluster_prompts_for_gpt.txt`.
+
+This file should contain, for each cluster:
+
+1. A concise **cluster summary** written by the code, such as:
+
+   - Cluster ID
+   - Size (# customers)
+   - Key stats: avg_age, avg_renta, most common segmento, number_of_products, top 3 products owned, etc.
+   - (Optionally) Top 3 products most frequently adopted in the next month.
+
+2. A **prompt template** for GAI, for example:
+
+   - “You are a marketing strategist for a bank. Based on the following cluster description, write a short persona and propose 2–3 banking products that should be prioritized for cross-selling, explaining why. Cluster description: …”
+
+The code should automatically write these cluster summaries and prompts into the text file, something like:
+
+   ===== CLUSTER 0 =====
+   [summary lines]
+
+   PROMPT FOR CHATGPT:
+   You are a marketing strategist ...
+   Cluster details:
+   [insert summary in bullet form]
+
+   ===== CLUSTER 1 =====
+   ...
+
+The user will manually paste these prompts into ChatGPT to obtain natural-language personas and marketing copy.
+
+Optional:
+
+- You MAY also include stub code for directly calling an LLM (via an API like OpenAI) if an API key is available, but:
+  - It must be easy to comment out or disable.
+  - The rest of the pipeline must not depend on it to run.
+
+
+6. Configuration and usability
+------------------------------
+Provide a simple way to configure:
+
+- REFERENCE_MONTH, default `"2016-05-28"`.
+- NEXT_MONTH, default `"2016-06-28"` (for adoption analysis; can be optional).
+- SELECTED_FEATURES list for clustering (e.g., which demographic numeric features to include alongside product indicators).
+- N_CLUSTERS or a range of clusters to scan.
+
+These can be module-level constants or passed as arguments to a main function.
+
+Implement a `main()` function or an equivalent entry point that:
+
+1. Loads the filtered data for the reference month (and optional next month).
+2. Cleans and prepares the segmentation feature matrix.
+3. Runs clustering and saves cluster assignments.
+4. Runs cluster profiling and saves summary tables and plots.
+5. Generates `cluster_prompts_for_gpt.txt` (or similar) with cluster descriptions and GAI prompts.
+
+When run as `python main.py`, it should execute the full default pipeline without additional manual steps.
+
+
+7. Dealing with test.csv
+------------------------
+We are NOT doing the original Kaggle evaluation, but test.csv is present.
+
+- You may ignore test.csv completely, or:
+  - Optionally demonstrate how to apply the trained clustering model to the customers in test.csv (e.g., clients at 2016-06-28) and produce their cluster labels.
+- If you use test.csv, remember it usually does NOT contain the 24 product columns; only the first 24 feature columns are present.
+  - In that case, cluster assignment might rely only on profile features or require a different feature subset.
+
+
+8. Documentation and comments
+-----------------------------
+- Include docstrings or comments for major functions:
+  - What they input, what they output, and any assumptions about data shape.
+- Briefly describe in comments at the top of the main file:
+  - What the script does.
+  - How to run it.
+  - Which files it expects (`train.csv`, `test.csv`).
+  - That it will create output files (cluster assignments, summary CSVs, plots, GAI prompt file).
+
+You do NOT need to write a formal README; minimal inline documentation is enough.
+
+
+WHAT YOU CAN FREELY DECIDE
+==========================
+You (Codex) are free to design:
+
+- Exact function names and signatures.
+- Exact structure of modules (single file vs. multiple).
+- The exact set of visualizations and how pretty they are.
+- The precise wording of the GAI prompts, as long as they clearly:
+  - Summarize each cluster.
+  - Ask the LLM to create a persona and marketing strategy for that cluster.
+
+Focus on correctness, clarity, and making it easy for a human user to:
+- Run the pipeline end-to-end.
+- Inspect clusters and plots.
+- Open the generated `cluster_prompts_for_gpt.txt` file and paste its contents into ChatGPT.
+
+End of instructions.

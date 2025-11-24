@@ -2,4 +2,5 @@
 !.gitignore
 !dataset_description.txt
 !instruction.txt
+!README.md
 !*.py

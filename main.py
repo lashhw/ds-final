@@ -300,6 +300,7 @@ def build_feature_matrix(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     ], axis=1)
 
     # Standardize numeric columns; leave binaries as 0/1.
+    feature_df[NUMERIC_FEATURES] = feature_df[NUMERIC_FEATURES].astype(np.float32)
     scaler = StandardScaler()
     scaled = scaler.fit_transform(feature_df[NUMERIC_FEATURES])
     feature_df.loc[:, NUMERIC_FEATURES] = scaled

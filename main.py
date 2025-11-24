@@ -135,8 +135,8 @@ class ClusterMetrics:
 def _dtype_map() -> Dict[str, str]:
     """Return dtype mapping to keep memory reasonable when reading CSV.
 
-    Strings are loaded as pandas string dtype; product columns are float32 to
-    allow coercion and later casting to small ints.
+    Strings are loaded as pandas string dtype to avoid parser failures; numeric
+    coercion happens later in cleaning to handle stray tokens safely.
     """
 
     dtypes: Dict[str, str] = {
@@ -147,25 +147,25 @@ def _dtype_map() -> Dict[str, str]:
         "sexo": "string",
         "age": "string",
         "fecha_alta": "string",
-        "ind_nuevo": "float32",
+        "ind_nuevo": "string",
         "antiguedad": "string",
-        "indrel": "float32",
+        "indrel": "string",
         "ult_fec_cli_1t": "string",
         "indrel_1mes": "string",
         "tiprel_1mes": "string",
         "indresi": "string",
         "indext": "string",
-        "conyuemp": "float32",
+        "conyuemp": "string",
         "canal_entrada": "string",
         "indfall": "string",
-        "tipodom": "float32",
-        "cod_prov": "float32",
+        "tipodom": "string",
+        "cod_prov": "string",
         "nomprov": "string",
-        "ind_actividad_cliente": "float32",
+        "ind_actividad_cliente": "string",
         "renta": "string",
         "segmento": "string",
     }
-    dtypes.update({col: "float32" for col in PRODUCT_COLUMNS})
+    dtypes.update({col: "string" for col in PRODUCT_COLUMNS})
     return dtypes
 
 

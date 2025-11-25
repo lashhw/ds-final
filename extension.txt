@@ -1,0 +1,217 @@
+TITLE
+=====
+Santander segmentation project – Extension: cross-sell opportunities, churn by cluster, and richer LLM prompts
+
+
+CONTEXT
+=======
+You already have a working pipeline in main.py that:
+
+- Reads train.csv in chunks.
+- Filters to REFERENCE_MONTH (e.g., 2016-05-28) and NEXT_MONTH (2016-06-28).
+- Cleans customer and product features.
+- Builds a feature matrix.
+- Picks K via silhouette/inertia.
+- Fits K-Means / MiniBatchKMeans.
+- Computes basic cluster profiles and product ownership means.
+- Optionally computes product adoption per cluster (from REFERENCE_MONTH to NEXT_MONTH).
+- Generates plots (product rates, age distribution, PCA).
+- Writes a cluster prompt file for LLM personas.
+
+Do NOT refactor this structure heavily. Just extend it with **new analytic functionality** and **additional LLM prompt outputs**.
+
+
+HIGH-LEVEL NEW GOALS
+====================
+1. Cross-sell opportunity scoring per cluster and per product.
+2. Simple churn / inactivity analysis by cluster.
+3. A richer LLM prompt file focusing on strategy-level questions, not just per-cluster personas.
+4. (Optional, but nice) Sample customer-level summaries per cluster that are easy to paste into an LLM for example-based reasoning.
+
+Keep all of this simple and readable. It’s fine to add a few helper functions and write a couple more CSVs and text files.
+
+
+1. CROSS-SELL OPPORTUNITY SCORING
+=================================
+Use the existing outputs to compute a **cross-sell opportunity table** by cluster and product.
+
+You already have:
+- `product_means`: average ownership rate of each product per cluster.
+- `adoption_rates`: optional table with per-cluster adoption rates per product from REFERENCE_MONTH to NEXT_MONTH (if NEXT_MONTH data exists).
+
+You should also compute **global** (all customers, ignoring clusters) metrics for comparison.
+
+Requirements:
+
+1. Compute global metrics
+   - Ownership:
+     - For each product, overall ownership rate in REFERENCE_MONTH across all customers.
+   - Adoption (only if NEXT_MONTH is available and adoption_rates is not None):
+     - For each product, overall “adoption” rate = fraction of customers with that product increasing from REFERENCE_MONTH to NEXT_MONTH.
+
+2. For each cluster and product, compute:
+   - `cluster_ownership` — from product_means.
+   - `global_ownership` — from the global calculation.
+   - If adoption data is available:
+     - `cluster_adoption` — from adoption_rates.
+     - `global_adoption` — from global adoption rates.
+
+3. Define simple cross-sell indicators (you can choose exact formulas, keep them intuitive and commented):
+   - For example:
+     - `ownership_gap = max(global_ownership - cluster_ownership, 0)`.
+     - `adoption_lift = cluster_adoption / global_adoption` (if global_adoption > 0, else NaN or 0).
+   - The idea: a product is a good cross-sell candidate in a given cluster if:
+     - Current ownership is relatively low (so there is room to sell more).
+     - Adoption tendency in that cluster (when offered) is strong compared with global.
+
+4. Build a **cross-sell ranking** per cluster:
+   - For each cluster, compute a combined score per product, e.g.:
+     - `cross_sell_score = ownership_gap * adoption_lift` (or any simple, documented metric).
+   - Rank products in descending order of cross_sell_score.
+   - Save only the top N (for example, top 5) per cluster in a table.
+
+5. Output:
+   - Write a CSV file in `output/`, e.g. `cluster_cross_sell_opportunities.csv`.
+   - Include columns such as:
+     - cluster
+     - product_name (the column name)
+     - cluster_ownership
+     - global_ownership
+     - cluster_adoption (if available)
+     - global_adoption (if available)
+     - ownership_gap
+     - adoption_lift
+     - cross_sell_score
+     - rank_within_cluster (1 = best cross-sell candidate for that cluster)
+
+
+2. CHURN / INACTIVITY ANALYSIS BY CLUSTER
+=========================================
+Use the existing REFERENCE_MONTH and NEXT_MONTH snapshots to compute a **simple churn or inactivity proxy** by cluster.
+
+Idea: use `ind_actividad_cliente` (already used to build `activity_index` in the reference code) at REFERENCE_MONTH and NEXT_MONTH.
+
+Basic definition (can be slightly adapted as you like, but document it in code comments):
+- A customer is considered “churned / inactive” if:
+  - `ind_actividad_cliente` is 1 (active) at REFERENCE_MONTH
+  - but 0 (inactive) at NEXT_MONTH.
+
+Requirements:
+
+1. After cleaning both months (`df_ref_clean` and `df_next_clean`), merge them by `ncodpers` (similar to what you do for adoption).
+2. Using the cluster labels for REFERENCE_MONTH, compute for each cluster:
+   - Number of customers with valid activity info in both months.
+   - Churn / inactivity rate (fraction of customers active at REFERENCE_MONTH who are inactive at NEXT_MONTH).
+   - Optionally also compute:
+     - Retention rate (1 - churn rate).
+3. Write a CSV, e.g. `cluster_churn_rates.csv`, containing:
+   - cluster
+   - num_customers_with_data
+   - churn_rate
+   - retention_rate
+
+This will complement the product adoption view with a risk/persistence view of each cluster.
+
+
+3. RICHER LLM PROMPT FILE FOR STRATEGY
+======================================
+You already build `cluster_prompts_for_gpt.txt` focusing on **per-cluster personas and offers**.
+
+Add another text file, e.g. `strategy_prompts_for_gpt.txt`, that focuses on **bank-level strategy questions** using the new cross-sell and churn information.
+
+Requirements:
+
+1. At the end of the pipeline (after computing cross-sell and churn tables), generate `strategy_prompts_for_gpt.txt`.
+2. The file should contain:
+   - A short overview of the segmentation, e.g.:
+     - Number of clusters,
+     - High-level stats per cluster (size, avg age, churn rate, etc. – can re-use the profile, churn, and cross-sell tables).
+   - For each cluster:
+     - A one-paragraph summary of its “role” for the bank, using numeric info:
+       - Size, value (income / num products), risk (churn), and growth opportunity (number and strength of cross-sell candidates).
+     - A preformatted LLM prompt paragraph like:
+
+       "You are a senior marketing strategist at a retail bank. Below is quantitative information for one customer segment. Please:
+        1. Describe this segment in 3–5 bullet points.
+        2. Identify their main risks (e.g., churn) and opportunities (products to grow).
+        3. Suggest 2–3 marketing actions or campaigns targeted at this segment, consistent with the numbers."
+
+       Then list:
+       - Cluster ID, size, churn rate, retention rate, top cross-sell products with scores, and any other relevant stats.
+
+3. Also include at least one **global** prompt at the end of the file, for example:
+
+   - A prompt that gives a high-level summary of all clusters (in a compact tabular text form) and asks the LLM to:
+     - Propose an overall segmentation strategy.
+     - Suggest how the bank should prioritize investment between clusters.
+     - Suggest which products to push in which segments.
+
+Implementation details:
+
+- You can write a new helper function (e.g., `build_strategy_prompt_file(...)`) that:
+  - Takes cluster profiles,
+  - Cross-sell table,
+  - Churn table,
+  - And maybe adoption / product means,
+  - Then writes the strategy prompt file.
+- Keep the text content simple plain text, not markdown-heavy; the goal is easy copy–paste into ChatGPT.
+
+
+4. OPTIONAL: SAMPLE CUSTOMER-LEVEL SUMMARIES FOR LLM USE
+========================================================
+This is optional but useful and still simple.
+
+Idea:
+- For each cluster, select a small random sample of customers (e.g., up to 10).
+- For each sampled customer, extract:
+  - Cluster ID.
+  - Age, renta, segmento.
+  - Number of products.
+  - List of owned products (the 24 product flags).
+- Write them to a text file, e.g. `customer_samples_for_gpt.txt`, in a human-readable form.
+
+For each customer, you can include a small “prompt header” such as:
+
+  "Below is a single anonymized bank customer profile in cluster X. Given their attributes and products, what additional products might make sense for them, and why? Assume only the bank’s existing products."
+
+But keep this part lightweight. The primary focus is cross-sell scoring and churn by cluster plus strategy-level prompts.
+
+
+5. INTEGRATION INTO EXISTING PIPELINE
+=====================================
+Do NOT over-engineer the integration.
+
+A simple flow in `run_pipeline()`:
+
+1. Run current code as it is:
+   - load months
+   - clean
+   - build features
+   - pick K
+   - fit clusters
+   - compute profiles and product_means
+   - compute adoption_rates (optional)
+   - plots
+   - cluster_prompts_for_gpt.txt
+   - metrics CSV
+
+2. After that, add calls to new helper functions:
+   - cross-sell scoring (needs product_means and adoption_rates, if present).
+   - churn analysis (needs df_ref_clean, df_next_clean, labels).
+   - strategy prompt file (needs profile_df, cross-sell table, churn table, and maybe adoption/product means).
+   - optional customer sample file (needs df_ref_clean and labels).
+
+3. Append the new outputs to the README.md description:
+   - Briefly mention the new CSVs and text files produced and what they contain.
+
+No need for CLI arguments, configuration files, or class hierarchies. Just keep things in a few well-named functions and call them from `run_pipeline()`.
+
+
+6. GENERAL STYLE
+================
+- Keep functions small and focused.
+- Add short comments explaining new metrics (e.g., what “cross_sell_score” means, how churn is defined).
+- Do not heavily refactor existing code or change its behavior, unless absolutely necessary to support the new features.
+- It’s okay if some logic reuses existing intermediate DataFrames; prefer clarity over cleverness.
+
+End of extension instructions.

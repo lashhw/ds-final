@@ -30,6 +30,10 @@ The script reads `train.csv` in chunks, keeps only the target months (defaults: 
 - `cluster_pca.png` — 2D PCA scatter colored by cluster.
 - `cluster_prompts_for_gpt.txt` — cluster summaries + prompt snippets for LLM persona/offer generation.
 - `cluster_adoption_rates.csv` — (if next month present) product adoption rates by cluster.
+- `cluster_cross_sell_opportunities.csv` — top cross-sell candidates per cluster with ownership gaps/adoption lift.
+- `cluster_churn_rates.csv` — simple churn/inactivity proxy per cluster using next month activity flags.
+- `strategy_prompts_for_gpt.txt` — strategy-focused LLM prompts that blend size, churn, and cross-sell opportunity data.
+- `customer_samples_for_gpt.txt` — optional small customer-level snippets per cluster for example-based reasoning.
 
 ## Configuration
 

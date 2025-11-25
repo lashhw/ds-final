@@ -424,6 +424,127 @@ def compute_adoption(
     return pd.DataFrame(adoption_rates).reset_index()
 
 
+def compute_global_ownership(df: pd.DataFrame) -> pd.Series:
+    """Average ownership rate for each product across all customers."""
+
+    return df[PRODUCT_COLUMNS].mean()
+
+
+def compute_global_adoption(df_t: pd.DataFrame, df_t1: pd.DataFrame) -> Optional[pd.Series]:
+    """Overall adoption rates from reference to next month for each product."""
+
+    if df_t.empty or df_t1.empty:
+        return None
+
+    curr = df_t[["ncodpers"] + PRODUCT_COLUMNS].copy()
+    nxt = df_t1[["ncodpers"] + PRODUCT_COLUMNS].copy()
+    merged = curr.merge(nxt, on="ncodpers", suffixes=("_t", "_t1"))
+
+    adoption = {}
+    for col in PRODUCT_COLUMNS:
+        adoption[col] = (merged[f"{col}_t1"] > merged[f"{col}_t"]).mean()
+    return pd.Series(adoption)
+
+
+def score_cross_sell_opportunities(
+    product_means: pd.DataFrame,
+    global_ownership: pd.Series,
+    adoption_rates: Optional[pd.DataFrame] = None,
+    global_adoption: Optional[pd.Series] = None,
+    top_n: int = 5,
+) -> pd.DataFrame:
+    """Rank cross-sell candidates per cluster and product.
+
+    ownership_gap highlights room to grow vs the bank average. adoption_lift
+    captures whether the cluster adopts the product faster than the bank
+    average when offered. cross_sell_score combines both in a simple product.
+    """
+
+    adoption_lookup = adoption_rates.set_index("cluster") if adoption_rates is not None else None
+    records = []
+
+    for _, row in product_means.iterrows():
+        cluster_id = int(row["cluster"])
+        cluster_adopt = adoption_lookup.loc[cluster_id] if adoption_lookup is not None else None
+
+        for product in PRODUCT_COLUMNS:
+            cluster_ownership = float(row[product])
+            global_own = float(global_ownership.get(product, np.nan))
+
+            ownership_gap = max(global_own - cluster_ownership, 0)
+
+            cluster_adoption = float(cluster_adopt[product]) if cluster_adopt is not None else np.nan
+            global_adopt = float(global_adoption.get(product, np.nan)) if global_adoption is not None else np.nan
+
+            adoption_lift = np.nan
+            if not np.isnan(cluster_adoption) and not np.isnan(global_adopt) and global_adopt > 0:
+                adoption_lift = cluster_adoption / global_adopt
+
+            cross_sell_score = ownership_gap if np.isnan(adoption_lift) else ownership_gap * adoption_lift
+
+            records.append(
+                {
+                    "cluster": cluster_id,
+                    "product_name": product,
+                    "cluster_ownership": cluster_ownership,
+                    "global_ownership": global_own,
+                    "cluster_adoption": cluster_adoption,
+                    "global_adoption": global_adopt,
+                    "ownership_gap": ownership_gap,
+                    "adoption_lift": adoption_lift,
+                    "cross_sell_score": cross_sell_score,
+                }
+            )
+
+    scored = pd.DataFrame(records)
+    scored["rank_within_cluster"] = scored.groupby("cluster")["cross_sell_score"].rank(method="first", ascending=False)
+    top_ranked = scored[scored["rank_within_cluster"] <= top_n].sort_values(["cluster", "rank_within_cluster"])
+    return top_ranked
+
+
+def compute_churn_by_cluster(
+    df_t: pd.DataFrame,
+    df_t1: pd.DataFrame,
+    labels_t: np.ndarray,
+) -> Optional[pd.DataFrame]:
+    """Simple churn proxy: active in reference month, inactive next month."""
+
+    if df_t.empty or df_t1.empty:
+        return None
+
+    ref = df_t[["ncodpers", "ind_actividad_cliente"]].copy()
+    nxt = df_t1[["ncodpers", "ind_actividad_cliente"]].copy()
+    merged = ref.merge(nxt, on="ncodpers", suffixes=("_t", "_t1"))
+
+    cluster_map = dict(zip(df_t["ncodpers"], labels_t))
+    merged["cluster"] = merged["ncodpers"].map(cluster_map)
+    merged = merged.dropna(subset=["cluster", "ind_actividad_cliente_t", "ind_actividad_cliente_t1"])
+    merged["cluster"] = merged["cluster"].astype(int)
+
+    merged["active_ref"] = merged["ind_actividad_cliente_t"] == 1
+    merged["inactive_next"] = merged["ind_actividad_cliente_t1"] == 0
+
+    records = []
+    for cluster_id, group in merged.groupby("cluster"):
+        with_data = len(group)
+        active_ref = group["active_ref"].sum()
+        churned = (group["active_ref"] & group["inactive_next"]).sum()
+
+        churn_rate = churned / active_ref if active_ref > 0 else np.nan
+        retention_rate = 1 - churn_rate if not np.isnan(churn_rate) else np.nan
+
+        records.append(
+            {
+                "cluster": cluster_id,
+                "num_customers_with_data": with_data,
+                "churn_rate": churn_rate,
+                "retention_rate": retention_rate,
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
 def _ensure_output_dir() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -546,6 +667,156 @@ def build_cluster_prompt_file(
     return filepath
 
 
+def build_strategy_prompt_file(
+    profile_df: pd.DataFrame,
+    cross_sell_df: pd.DataFrame,
+    churn_df: Optional[pd.DataFrame],
+    product_means: pd.DataFrame,
+    filepath: Path = OUTPUT_DIR / "strategy_prompts_for_gpt.txt",
+) -> Path:
+    """Strategy-level prompts combining profiles, churn, and cross-sell info."""
+
+    churn_lookup = churn_df.set_index("cluster") if churn_df is not None else None
+
+    lines: List[str] = []
+    lines.append("Bank-wide segmentation summary")
+    lines.append(f"- Reference month: {REFERENCE_MONTH}")
+    lines.append(f"- Clusters: {profile_df['cluster'].nunique()}")
+    lines.append("")
+    lines.append("Per-cluster quick stats (size | avg_age | median_renta | churn):")
+    for _, row in profile_df.sort_values("cluster").iterrows():
+        churn_rate = float("nan")
+        if churn_lookup is not None and row["cluster"] in churn_lookup.index:
+            churn_rate = churn_lookup.loc[row["cluster"], "churn_rate"]
+        churn_text = "n/a" if pd.isna(churn_rate) else f"{churn_rate:.1%}"
+        lines.append(
+            f"Cluster {int(row['cluster'])}: "
+            f"{int(row['size'])} customers | age {row['avg_age']:.1f} | "
+            f"median renta {row['median_renta']:.0f} | churn {churn_text}"
+        )
+
+    lines.append("")
+    lines.append("Use the notes below to brief an LLM on strategy options per segment.")
+    lines.append("")
+
+    for _, row in profile_df.sort_values("cluster").iterrows():
+        cluster_id = int(row["cluster"])
+        churn_rate = float("nan")
+        retention_rate = float("nan")
+        if churn_lookup is not None and cluster_id in churn_lookup.index:
+            churn_rate = churn_lookup.loc[cluster_id, "churn_rate"]
+            retention_rate = churn_lookup.loc[cluster_id, "retention_rate"]
+
+        churn_text = "n/a" if pd.isna(churn_rate) else f"{churn_rate:.1%}"
+        retention_text = "n/a" if pd.isna(retention_rate) else f"{retention_rate:.1%}"
+
+        cluster_products = product_means[product_means["cluster"] == cluster_id].drop(columns=["cluster"])
+        top_owned = cluster_products.T.squeeze().sort_values(ascending=False).head(3)
+
+        cs_candidates = cross_sell_df[cross_sell_df["cluster"] == cluster_id]
+        cs_candidates = cs_candidates.sort_values("rank_within_cluster").head(5)
+        cs_summary = ", ".join(
+            f"{r.product_name} (score {r.cross_sell_score:.3f}, gap {r.ownership_gap:.2f})"
+            for r in cs_candidates.itertuples()
+        ) if not cs_candidates.empty else "None identified"
+
+        lines.append(f"===== CLUSTER {cluster_id} =====")
+        lines.append(
+            f"Size {int(row['size'])}; avg age {row['avg_age']:.1f}; "
+            f"median renta {row['median_renta']:.0f}; avg products {row['avg_products']:.2f}; "
+            f"top segment {row['top_segment']}."
+        )
+        lines.append("Top owned products: " + ", ".join(f"{p} ({rate:.1%})" for p, rate in top_owned.items()))
+        lines.append(f"Churn rate: {churn_text} | Retention: {retention_text}")
+        lines.append("Best cross-sell candidates: " + cs_summary)
+        lines.append("")
+        lines.append("PROMPT FOR LLM STRATEGIST:")
+        lines.append(
+            "You are a senior marketing strategist at a retail bank. Below is quantitative information for one "
+            "customer segment. Please: "
+            "1) Describe this segment in 3–5 bullet points. "
+            "2) Identify their main risks (e.g., churn) and opportunities (products to grow). "
+            "3) Suggest 2–3 marketing actions or campaigns targeted at this segment, consistent with the numbers."
+        )
+        lines.append(
+            f"Cluster data: id={cluster_id}; size={int(row['size'])}; avg_age={row['avg_age']:.1f}; "
+            f"median_renta={row['median_renta']:.0f}; avg_products={row['avg_products']:.2f}; "
+            f"churn={churn_text}; retention={retention_text}; "
+            f"top_cross_sell={cs_summary}."
+        )
+        lines.append("")
+
+    lines.append("===== GLOBAL PROMPT =====")
+    lines.append(
+        "You are advising the bank on how to prioritize marketing investment across all clusters. "
+        "Using the cluster summaries above, propose: "
+        "1) An overall segmentation strategy. "
+        "2) Which clusters to prioritize for retention vs growth. "
+        "3) Which products to push in which clusters, referencing cross-sell scores and churn rates."
+    )
+    lines.append(
+        "Cluster snapshot table (cluster | size | avg_age | median_renta | churn | top cross-sell products):"
+    )
+    for cluster_id in sorted(profile_df["cluster"].unique()):
+        cluster_row = profile_df[profile_df["cluster"] == cluster_id].iloc[0]
+        churn_text = "n/a"
+        if churn_lookup is not None and cluster_id in churn_lookup.index:
+            churn_val = churn_lookup.loc[cluster_id, "churn_rate"]
+            churn_text = "n/a" if pd.isna(churn_val) else f"{churn_val:.1%}"
+
+        cs_candidates = cross_sell_df[cross_sell_df["cluster"] == cluster_id]
+        cs_candidates = cs_candidates.sort_values("rank_within_cluster").head(3)
+        cs_summary = ", ".join(
+            f"{r.product_name} ({r.cross_sell_score:.3f})" for r in cs_candidates.itertuples()
+        ) if not cs_candidates.empty else "None"
+
+        lines.append(
+            f"Cluster {cluster_id}: size {int(cluster_row['size'])} | "
+            f"avg_age {cluster_row['avg_age']:.1f} | "
+            f"median_renta {cluster_row['median_renta']:.0f} | "
+            f"churn {churn_text} | top cross-sell {cs_summary}"
+        )
+
+    filepath.write_text("\n".join(lines), encoding="utf-8")
+    return filepath
+
+
+def write_customer_samples(
+    df: pd.DataFrame,
+    labels: np.ndarray,
+    sample_per_cluster: int = 10,
+    filepath: Path = OUTPUT_DIR / "customer_samples_for_gpt.txt",
+) -> Optional[Path]:
+    """Optional small customer snippets for LLM example-based reasoning."""
+
+    if df.empty:
+        return None
+
+    profiled = df.copy()
+    profiled["cluster"] = labels
+
+    lines: List[str] = []
+    for cluster_id, group in profiled.groupby("cluster"):
+        take = min(len(group), sample_per_cluster)
+        sampled = group.sample(n=take, random_state=RANDOM_STATE)
+        lines.append(f"===== CLUSTER {cluster_id} SAMPLE CUSTOMERS =====")
+        for _, row in sampled.iterrows():
+            owned = [col for col in PRODUCT_COLUMNS if row[col] == 1]
+            lines.append(
+                "Below is a single anonymized bank customer profile in cluster "
+                f"{cluster_id}. Based on their attributes and products, what additional products might make sense?"
+            )
+            lines.append(
+                f"- Age: {int(row['age']) if not pd.isna(row['age']) else 'n/a'} | "
+                f"Income: {row['renta_filled']:.0f} | Segment: {row['segmento']} | "
+                f"Products owned ({int(row['num_products'])}): {', '.join(owned) if owned else 'none'}"
+            )
+            lines.append("")
+
+    filepath.write_text("\n".join(lines), encoding="utf-8")
+    return filepath
+
+
 # Optional, lightweight skeleton for calling an LLM API directly.
 def call_llm_stub(prompt: str, api_key: Optional[str] = None) -> str:
     """Minimal example of invoking an OpenAI-compatible chat completion API.
@@ -622,13 +893,33 @@ def run_pipeline() -> None:
     profile_df.to_csv(profile_path, index=False)
 
     product_means = cluster_product_means(df_ref_clean, labels)
+    global_ownership = compute_global_ownership(df_ref_clean)
 
     adoption_rates = None
+    global_adoption = None
     if not df_next_clean.empty:
         print("Computing adoption rates using next month...")
         adoption_rates = compute_adoption(df_ref_clean, df_next_clean, labels)
         if adoption_rates is not None:
             adoption_rates.to_csv(OUTPUT_DIR / "cluster_adoption_rates.csv", index=False)
+            global_adoption = compute_global_adoption(df_ref_clean, df_next_clean)
+
+    print("Scoring cross-sell opportunities...")
+    cross_sell_df = score_cross_sell_opportunities(
+        product_means,
+        global_ownership,
+        adoption_rates=adoption_rates,
+        global_adoption=global_adoption,
+        top_n=5,
+    )
+    cross_sell_df.to_csv(OUTPUT_DIR / "cluster_cross_sell_opportunities.csv", index=False)
+
+    churn_df = None
+    if not df_next_clean.empty:
+        print("Computing churn / inactivity rates by cluster...")
+        churn_df = compute_churn_by_cluster(df_ref_clean, df_next_clean, labels)
+        if churn_df is not None:
+            churn_df.to_csv(OUTPUT_DIR / "cluster_churn_rates.csv", index=False)
 
     print("Generating plots...")
     plot_product_rates(product_means)
@@ -637,6 +928,10 @@ def run_pipeline() -> None:
 
     print("Writing LLM prompt file...")
     build_cluster_prompt_file(df_ref_clean, labels, product_means, adoption_rates)
+    print("Writing strategy prompt file...")
+    build_strategy_prompt_file(profile_df, cross_sell_df, churn_df, product_means)
+    print("Writing sample customer snippets for LLMs...")
+    write_customer_samples(df_ref_clean, labels)
 
     # Optional: save metrics summary
     metrics_path = OUTPUT_DIR / "cluster_metrics.csv"
